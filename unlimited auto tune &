@@ -1,0 +1,1063 @@
+
+import ctypes
+import os
+import platform
+import time
+
+# --- J2534 Constants (Simplified - these vary by standard and driver) ---
+# You'd typically get these from a J2534 header file or documentation
+# For demonstration, we'll use placeholders. Real values are important!
+
+# Error Codes (just a few examples)
+ERR_NOERROR = 0x00
+ERR_INVALID_DEVICE_ID = 0x01
+ERR_NULL_PARAMETER = 0x02
+ERR_INVALID_IOCTL_ID = 0x03
+# ... many more
+
+# Protocol IDs
+PROTOCOL_CAN = 0x05
+PROTOCOL_ISO15765 = 0x06 # UDS over CAN
+
+# Connect Flags
+CAN_250KBPS = 0x01
+CAN_500KBPS = 0x02
+
+# Message Types
+ISO15765_FRAME_PAD = 0x00000004 # Some drivers require padding for UDS messages
+
+# --- J2534 Structs (Simplified) ---
+# These mirror the C structs defined in the J2534 standard
+
+class SCONFIG(ctypes.Structure):
+   _fields_ = [
+       ("Parameter", ctypes.c_ulong),
+       ("Value", ctypes.c_ulong),
+   ]
+
+class SCONFIG_LIST(ctypes.Structure):
+   _fields_ = [
+       ("NumOfParams", ctypes.c_ulong),
+       ("ConfigPtr", ctypes.POINTER(SCONFIG)),
+   ]
+
+class PASSTHRU_MSG(ctypes.Structure):
+   _fields_ = [
+       ("ProtocolID", ctypes.c_ulong),
+       ("RxStatus", ctypes.c_ulong),
+       ("TxFlags", ctypes.c_ulong),
+       ("Timestamp", ctypes.c_ulong),
+       ("DataSize", ctypes.c_ulong),
+       ("ExtraDataIndex", ctypes.c_ulong),
+       ("Data", ctypes.c_ubyte * 4128), # Max data size for ISO15765 + extra data
+   ]
+
+# --- J2534 Function Pointers (Conceptual) ---
+# These are the functions we'll load from the J2534 DLL
+
+# Pointer types
+LP_PASSTHRU_MSG = ctypes.POINTER(PASSTHRU_MSG)
+LP_SCONFIG_LIST = ctypes.POINTER(SCONFIG_LIST)
+LP_ULONG = ctypes.POINTER(ctypes.c_ulong)
+LP_VOID = ctypes.c_void_p # Generic pointer
+
+class J2534Interface:
+   def __init__(self, j2534_dll_path=None):
+       """
+       Initializes the J2534 interface.
+       :param j2534_dll_path: Path to the J2534 PassThru DLL for your device.
+                              (e.g., 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll')
+       """
+       self.j2534_dll = None
+       self.device_id = ctypes.c_ulong(0)
+       self.channel_id = ctypes.c_ulong(0)
+       self.connected = False
+
+       if j2534_dll_path:
+           self.load_dll(j2534_dll_path)
+       else:
+           print("Warning: No J2534 DLL path provided. Cannot use J2534 features.")
+
+   def load_dll(self, dll_path):
+       """
+       Loads the J2534 DLL and maps its functions.
+       """
+       if not os.path.exists(dll_path):
+           print(f"Error: J2534 DLL not found at {dll_path}")
+           return False
+
+       try:
+           # Load the DLL
+           if platform.system() == "Windows":
+               self.j2534_dll = ctypes.WinDLL(dll_path)
+           elif platform.system() == "Linux":
+               self.j2534_dll = ctypes.CDLL(dll_path) # Assuming .so file
+           else:
+               print("Unsupported operating system for J2534 DLL loading.")
+               return False
+
+           # Map the J2534 functions.
+           # IMPORTANT: The actual argument types (argtypes) and return types (restype)
+           # MUST match the specific J2534 DLL's function signatures.
+           # These are common but may vary slightly. Consult your device's SDK.
+
+           self.j2534_dll.PassThruOpen.argtypes = [LP_VOID, LP_ULONG]
+           self.j2534_dll.PassThruOpen.restype = ctypes.c_long # Returns S_OK (0) or error
+
+           self.j2534_dll.PassThruClose.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruClose.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruConnect.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, LP_ULONG
+           ]
+           self.j2534_dll.PassThruConnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruDisconnect.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruDisconnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruReadMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruReadMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruWriteMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruWriteMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruIoctl.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, LP_VOID, LP_VOID
+           ]
+           self.j2534_dll.PassThruIoctl.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruSetConfig.argtypes = [ctypes.c_ulong, LP_SCONFIG_LIST]
+           self.j2534_dll.PassThruSetConfig.restype = ctypes.c_long
+
+           print(f"J2534 DLL '{dll_path}' loaded successfully.")
+           return True
+       except Exception as e:
+           print(f"Error loading J2534 DLL or mapping functions: {e}")
+           self.j2534_dll = None
+           return False
+
+   def open_device(self):
+       """
+       Opens a J2534 device.
+       """
+       if not self.j2534_dll:
+           print("J2534 DLL not loaded.")
+           return False
+
+       ret = self.j2534_dll.PassThruOpen(None, ctypes.byref(self.device_id))
+       if ret == ERR_NOERROR:
+           print(f"J2534 device opened. Device ID: {self.device_id.value}")
+           return True
+       else:
+           print(f"Failed to open J2534 device. Error: {hex(ret)}")
+           return False
+
+   def close_device(self):
+       """
+       Closes the J2534 device.
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruClose(self.device_id)
+       if ret == ERR_NOERROR:
+           print("J2534 device closed.")
+           self.device_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to close J2534 device. Error: {hex(ret)}")
+
+   def connect_channel(self, protocol_id, baudrate_flag=CAN_500KBPS):
+       """
+       Connects a communication channel to the ECU.
+       :param protocol_id: Protocol ID (e.g., PROTOCOL_ISO15765 for UDS over CAN).
+       :param baudrate_flag: Baud rate flag (e.g., CAN_500KBPS).
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           print("Device not open.")
+           return False
+
+       ret = self.j2534_dll.PassThruConnect(
+           self.device_id,
+           protocol_id,
+           0, # Flags (e.g., for normal, loopback, etc. - 0 for default)
+           baudrate_flag, # Baud rate or flag
+           ctypes.byref(self.channel_id)
+       )
+       if ret == ERR_NOERROR:
+           self.connected = True
+           print(f"Channel connected. Channel ID: {self.channel_id.value}")
+           return True
+       else:
+           print(f"Failed to connect channel. Error: {hex(ret)}")
+           return False
+
+   def disconnect_channel(self):
+       """
+       Disconnects the communication channel.
+       """
+       if not self.j2534_dll or self.channel_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruDisconnect(self.channel_id)
+       if ret == ERR_NOERROR:
+           print("Channel disconnected.")
+           self.channel_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to disconnect channel. Error: {hex(ret)}")
+
+   def read_messages(self, num_msgs_to_read=1, timeout_ms=100):
+       """
+       Reads messages from the ECU.
+       :param num_msgs_to_read: Max number of messages to attempt to read.
+       :param timeout_ms: Timeout in milliseconds.
+       :return: List of received messages (as bytes) or None on error.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return None
+
+       msgs = (PASSTHRU_MSG * num_msgs_to_read)()
+       num_msgs = ctypes.c_ulong(num_msgs_to_read)
+
+       ret = self.j2534_dll.PassThruReadMsgs(
+           self.channel_id,
+           ctypes.byref(msgs[0]),
+           ctypes.byref(num_msgs),
+           timeout_ms
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value > 0:
+           received_data = []
+           for i in range(num_msgs.value):
+               msg_data = bytes(msgs[i].Data[:msgs[i].DataSize])
+               received_data.append(msg_data)
+           return received_data
+       elif ret != ERR_NOERROR:
+           print(f"Error reading messages: {hex(ret)}")
+           return None
+       return [] # No messages read
+
+   def write_message(self, protocol_id, data, tx_flags=0):
+       """
+       Writes a single message to the ECU.
+       :param protocol_id: Protocol ID of the message.
+       :param data: Bytes to send.
+       :param tx_flags: Transmit flags (e.g., ISO15765_FRAME_PAD).
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       msg = PASSTHRU_MSG()
+       msg.ProtocolID = protocol_id
+       msg.TxFlags = tx_flags
+       msg.DataSize = len(data)
+       
+       # Copy data to the ctypes array
+       for i, byte_val in enumerate(data):
+           msg.Data[i] = byte_val
+
+       num_msgs = ctypes.c_ulong(1) # Sending one message
+
+       ret = self.j2534_dll.PassThruWriteMsgs(
+           self.channel_id,
+           ctypes.byref(msg),
+           ctypes.byref(num_msgs),
+           0 # Timeout (0 means write immediately)
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value == 1:
+           # print(f"Message written: {data.hex()}")
+           return True
+       else:
+           print(f"Error writing message: {hex(ret)}")
+           return False
+           
+   def set_config(self, parameter, value):
+       """
+       Sets a configuration parameter for the channel.
+       :param parameter: The configuration parameter ID (e.g., J2534_ISO15765_BS).
+       :param value: The value to set.
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       # Create SCONFIG and SCONFIG_LIST
+       sconfig = SCONFIG(Parameter=parameter, Value=value)
+       sconfig_list = SCONFIG_LIST(NumOfParams=1, ConfigPtr=ctypes.pointer(sconfig))
+
+       ret = self.j2534_dll.PassThruSetConfig(self.channel_id, ctypes.byref(sconfig_list))
+       if ret == ERR_NOERROR:
+           print(f"Config set: Parameter {hex(parameter)}, Value {hex(value)}")
+           return True
+       else:
+           print(f"Failed to set config. Error: {hex(ret)}")
+           return False
+
+
+# --- Example Usage (Conceptual) ---
+if __name__ == "__main__":
+   # YOU NEED TO FIND THE ACTUAL PATH TO YOUR J2534 DLL!
+   # This will vary based on your J2534 PassThru device and its installed drivers.
+   # Common locations: C:\Program Files (x86)\<Device Manufacturer>\<Device Name>\J2534.dll
+   # Example for a Tactrix OpenPort 2.0 on Windows:
+   # J2534_DLL = 'C:\\Program Files (x86)\\OpenECU\\OpenPort 2.0 J2534\\OP20PT32.dll'
+   # Example for Mongoose-Pro GM:
+   J2534_DLL = 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll' # Placeholder!
+
+   if not os.path.exists(J2534_DLL):
+       print(f"ERROR: J2534 DLL not found at '{J2534_DLL}'. Please update J2534_DLL variable with your device's DLL path.")
+       print("You need a J2534 compatible device and its drivers installed.")
+       print("Exiting example.")
+       exit()
+
+   j2534_client = J2534Interface(J2534_DLL)
+
+   if j2534_client.open_device():
+       # Let's assume we're connecting to a modern Ford/Chevy/Dodge ECU that uses ISO15765 (UDS over CAN)
+       if j2534_client.connect_channel(PROTOCOL_ISO15765, CAN_500KBPS):
+           print("\n--- Sending a UDS Diagnostic Session Control Message (e.g., to switch to Extended Diagnostic Session) ---")
+           # UDS message format: Service ID + Sub-function ID (if applicable) + Data
+           # For DiagnosticSessionControl (0x10), switch to Extended Diagnostic Session (0x03)
+           uds_request = bytes([0x10, 0x03])
+           
+           # Note: For flashing, you'd use services like 0x34 (Request Download), 0x36 (Transfer Data), 0x37 (Request Transfer Exit), etc.
+           # This is highly ECU-specific and requires knowledge of the ECU's UDS implementation.
+
+           if j2534_client.write_message(PROTOCOL_ISO15765, uds_request, ISO15765_FRAME_PAD):
+               print("UDS Diagnostic Session Change request sent.")
+               # Give ECU time to respond
+               time.sleep(0.1)
+               
+               print("\n--- Reading Response ---")
+               responses = j2534_client.read_messages(num_msgs_to_read=5, timeout_ms=500)
+               if responses:
+                   for resp in responses:
+                       print(f"Received UDS response: {resp.hex()}")
+                       # Expected positive response for 0x10 0x03 is 0x50 0x03
+                       if resp == bytes([0x50, 0x03]):
+                           print("Successfully switched to Extended Diagnostic Session.")
+               else:
+                   print("No response received for UDS request.")
+
+           j2534_client.disconnect_channel()
+       j2534_client.close_device()
+   else:
+       print("Failed to initialize J2534 interface.")
+import ctypes
+import os
+import platform
+import time
+
+# --- J2534 Constants (Simplified - these vary by standard and driver) ---
+# You'd typically get these from a J2534 header file or documentation
+# For demonstration, we'll use placeholders. Real values are important!
+
+# Error Codes (just a few examples)
+ERR_NOERROR = 0x00
+ERR_INVALID_DEVICE_ID = 0x01
+ERR_NULL_PARAMETER = 0x02
+ERR_INVALID_IOCTL_ID = 0x03
+# ... many more
+
+# Protocol IDs
+PROTOCOL_CAN = 0x05
+PROTOCOL_ISO15765 = 0x06 # UDS over CAN
+
+# Connect Flags
+CAN_250KBPS = 0x01
+CAN_500KBPS = 0x02
+
+# Message Types
+ISO15765_FRAME_PAD = 0x00000004 # Some drivers require padding for UDS messages
+
+# --- J2534 Structs (Simplified) ---
+# These mirror the C structs defined in the J2534 standard
+
+class SCONFIG(ctypes.Structure):
+   _fields_ = [
+       ("Parameter", ctypes.c_ulong),
+       ("Value", ctypes.c_ulong),
+   ]
+
+class SCONFIG_LIST(ctypes.Structure):
+   _fields_ = [
+       ("NumOfParams", ctypes.c_ulong),
+       ("ConfigPtr", ctypes.POINTER(SCONFIG)),
+   ]
+
+class PASSTHRU_MSG(ctypes.Structure):
+   _fields_ = [
+       ("ProtocolID", ctypes.c_ulong),
+       ("RxStatus", ctypes.c_ulong),
+       ("TxFlags", ctypes.c_ulong),
+       ("Timestamp", ctypes.c_ulong),
+       ("DataSize", ctypes.c_ulong),
+       ("ExtraDataIndex", ctypes.c_ulong),
+       ("Data", ctypes.c_ubyte * 4128), # Max data size for ISO15765 + extra data
+   ]
+
+# --- J2534 Function Pointers (Conceptual) ---
+# These are the functions we'll load from the J2534 DLL
+
+# Pointer types
+LP_PASSTHRU_MSG = ctypes.POINTER(PASSTHRU_MSG)
+LP_SCONFIG_LIST = ctypes.POINTER(SCONFIG_LIST)
+LP_ULONG = ctypes.POINTER(ctypes.c_ulong)
+LP_VOID = ctypes.c_void_p # Generic pointer
+
+class J2534Interface:
+   def __init__(self, j2534_dll_path=None):
+       """
+       Initializes the J2534 interface.
+       :param j2534_dll_path: Path to the J2534 PassThru DLL for your device.
+                              (e.g., 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll')
+       """
+       self.j2534_dll = None
+       self.device_id = ctypes.c_ulong(0)
+       self.channel_id = ctypes.c_ulong(0)
+       self.connected = False
+
+       if j2534_dll_path:
+           self.load_dll(j2534_dll_path)
+       else:
+           print("Warning: No J2534 DLL path provided. Cannot use J2534 features.")
+
+   def load_dll(self, dll_path):
+       """
+       Loads the J2534 DLL and maps its functions.
+       """
+       if not os.path.exists(dll_path):
+           print(f"Error: J2534 DLL not found at {dll_path}")
+           return False
+
+       try:
+           # Load the DLL
+           if platform.system() == "Windows":
+               self.j2534_dll = ctypes.WinDLL(dll_path)
+           elif platform.system() == "Linux":
+               self.j2534_dll = ctypes.CDLL(dll_path) # Assuming .so file
+           else:
+               print("Unsupported operating system for J2534 DLL loading.")
+               return False
+
+           # Map the J2534 functions.
+           # IMPORTANT: The actual argument types (argtypes) and return types (restype)
+           # MUST match the specific J2534 DLL's function signatures.
+           # These are common but may vary slightly. Consult your device's SDK.
+
+           self.j2534_dll.PassThruOpen.argtypes = [LP_VOID, LP_ULONG]
+           self.j2534_dll.PassThruOpen.restype = ctypes.c_long # Returns S_OK (0) or error
+
+           self.j2534_dll.PassThruClose.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruClose.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruConnect.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, LP_ULONG
+           ]
+           self.j2534_dll.PassThruConnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruDisconnect.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruDisconnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruReadMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruReadMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruWriteMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruWriteMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruIoctl.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, LP_VOID, LP_VOID
+           ]
+           self.j2534_dll.PassThruIoctl.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruSetConfig.argtypes = [ctypes.c_ulong, LP_SCONFIG_LIST]
+           self.j2534_dll.PassThruSetConfig.restype = ctypes.c_long
+
+           print(f"J2534 DLL '{dll_path}' loaded successfully.")
+           return True
+       except Exception as e:
+           print(f"Error loading J2534 DLL or mapping functions: {e}")
+           self.j2534_dll = None
+           return False
+
+   def open_device(self):
+       """
+       Opens a J2534 device.
+       """
+       if not self.j2534_dll:
+           print("J2534 DLL not loaded.")
+           return False
+
+       ret = self.j2534_dll.PassThruOpen(None, ctypes.byref(self.device_id))
+       if ret == ERR_NOERROR:
+           print(f"J2534 device opened. Device ID: {self.device_id.value}")
+           return True
+       else:
+           print(f"Failed to open J2534 device. Error: {hex(ret)}")
+           return False
+
+   def close_device(self):
+       """
+       Closes the J2534 device.
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruClose(self.device_id)
+       if ret == ERR_NOERROR:
+           print("J2534 device closed.")
+           self.device_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to close J2534 device. Error: {hex(ret)}")
+
+   def connect_channel(self, protocol_id, baudrate_flag=CAN_500KBPS):
+       """
+       Connects a communication channel to the ECU.
+       :param protocol_id: Protocol ID (e.g., PROTOCOL_ISO15765 for UDS over CAN).
+       :param baudrate_flag: Baud rate flag (e.g., CAN_500KBPS).
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           print("Device not open.")
+           return False
+
+       ret = self.j2534_dll.PassThruConnect(
+           self.device_id,
+           protocol_id,
+           0, # Flags (e.g., for normal, loopback, etc. - 0 for default)
+           baudrate_flag, # Baud rate or flag
+           ctypes.byref(self.channel_id)
+       )
+       if ret == ERR_NOERROR:
+           self.connected = True
+           print(f"Channel connected. Channel ID: {self.channel_id.value}")
+           return True
+       else:
+           print(f"Failed to connect channel. Error: {hex(ret)}")
+           return False
+
+   def disconnect_channel(self):
+       """
+       Disconnects the communication channel.
+       """
+       if not self.j2534_dll or self.channel_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruDisconnect(self.channel_id)
+       if ret == ERR_NOERROR:
+           print("Channel disconnected.")
+           self.channel_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to disconnect channel. Error: {hex(ret)}")
+
+   def read_messages(self, num_msgs_to_read=1, timeout_ms=100):
+       """
+       Reads messages from the ECU.
+       :param num_msgs_to_read: Max number of messages to attempt to read.
+       :param timeout_ms: Timeout in milliseconds.
+       :return: List of received messages (as bytes) or None on error.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return None
+
+       msgs = (PASSTHRU_MSG * num_msgs_to_read)()
+       num_msgs = ctypes.c_ulong(num_msgs_to_read)
+
+       ret = self.j2534_dll.PassThruReadMsgs(
+           self.channel_id,
+           ctypes.byref(msgs[0]),
+           ctypes.byref(num_msgs),
+           timeout_ms
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value > 0:
+           received_data = []
+           for i in range(num_msgs.value):
+               msg_data = bytes(msgs[i].Data[:msgs[i].DataSize])
+               received_data.append(msg_data)
+           return received_data
+       elif ret != ERR_NOERROR:
+           print(f"Error reading messages: {hex(ret)}")
+           return None
+       return [] # No messages read
+
+   def write_message(self, protocol_id, data, tx_flags=0):
+       """
+       Writes a single message to the ECU.
+       :param protocol_id: Protocol ID of the message.
+       :param data: Bytes to send.
+       :param tx_flags: Transmit flags (e.g., ISO15765_FRAME_PAD).
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       msg = PASSTHRU_MSG()
+       msg.ProtocolID = protocol_id
+       msg.TxFlags = tx_flags
+       msg.DataSize = len(data)
+       
+       # Copy data to the ctypes array
+       for i, byte_val in enumerate(data):
+           msg.Data[i] = byte_val
+
+       num_msgs = ctypes.c_ulong(1) # Sending one message
+
+       ret = self.j2534_dll.PassThruWriteMsgs(
+           self.channel_id,
+           ctypes.byref(msg),
+           ctypes.byref(num_msgs),
+           0 # Timeout (0 means write immediately)
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value == 1:
+           # print(f"Message written: {data.hex()}")
+           return True
+       else:
+           print(f"Error writing message: {hex(ret)}")
+           return False
+           
+   def set_config(self, parameter, value):
+       """
+       Sets a configuration parameter for the channel.
+       :param parameter: The configuration parameter ID (e.g., J2534_ISO15765_BS).
+       :param value: The value to set.
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       # Create SCONFIG and SCONFIG_LIST
+       sconfig = SCONFIG(Parameter=parameter, Value=value)
+       sconfig_list = SCONFIG_LIST(NumOfParams=1, ConfigPtr=ctypes.pointer(sconfig))
+
+       ret = self.j2534_dll.PassThruSetConfig(self.channel_id, ctypes.byref(sconfig_list))
+       if ret == ERR_NOERROR:
+           print(f"Config set: Parameter {hex(parameter)}, Value {hex(value)}")
+           return True
+       else:
+           print(f"Failed to set config. Error: {hex(ret)}")
+           return False
+
+
+# --- Example Usage (Conceptual) ---
+if __name__ == "__main__":
+   # YOU NEED TO FIND THE ACTUAL PATH TO YOUR J2534 DLL!
+   # This will vary based on your J2534 PassThru device and its installed drivers.
+   # Common locations: C:\Program Files (x86)\<Device Manufacturer>\<Device Name>\J2534.dll
+   # Example for a Tactrix OpenPort 2.0 on Windows:
+   # J2534_DLL = 'C:\\Program Files (x86)\\OpenECU\\OpenPort 2.0 J2534\\OP20PT32.dll'
+   # Example for Mongoose-Pro GM:
+   J2534_DLL = 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll' # Placeholder!
+
+   if not os.path.exists(J2534_DLL):
+       print(f"ERROR: J2534 DLL not found at '{J2534_DLL}'. Please update J2534_DLL variable with your device's DLL path.")
+       print("You need a J2534 compatible device and its drivers installed.")
+       print("Exiting example.")
+       exit()
+
+   j2534_client = J2534Interface(J2534_DLL)
+
+   if j2534_client.open_device():
+       # Let's assume we're connecting to a modern Ford/Chevy/Dodge ECU that uses ISO15765 (UDS over CAN)
+       if j2534_client.connect_channel(PROTOCOL_ISO15765, CAN_500KBPS):
+           print("\n--- Sending a UDS Diagnostic Session Control Message (e.g., to switch to Extended Diagnostic Session) ---")
+           # UDS message format: Service ID + Sub-function ID (if applicable) + Data
+           # For DiagnosticSessionControl (0x10), switch to Extended Diagnostic Session (0x03)
+           uds_request = bytes([0x10, 0x03])
+           
+           # Note: For flashing, you'd use services like 0x34 (Request Download), 0x36 (Transfer Data), 0x37 (Request Transfer Exit), etc.
+           # This is highly ECU-specific and requires knowledge of the ECU's UDS implementation.
+
+           if j2534_client.write_message(PROTOCOL_ISO15765, uds_request, ISO15765_FRAME_PAD):
+               print("UDS Diagnostic Session Change request sent.")
+               # Give ECU time to respond
+               time.sleep(0.1)
+               
+               print("\n--- Reading Response ---")
+               responses = j2534_client.read_messages(num_msgs_to_read=5, timeout_ms=500)
+               if responses:
+                   for resp in responses:
+                       print(f"Received UDS response: {resp.hex()}")
+                       # Expected positive response for 0x10 0x03 is 0x50 0x03
+                       if resp == bytes([0x50, 0x03]):
+                           print("Success
+import ctypes
+import os
+import platform
+import time
+
+# --- J2534 Constants (Simplified - these vary by standard and driver) ---
+# You'd typically get these from a J2534 header file or documentation
+# For demonstration, we'll use placeholders. Real values are important!
+
+# Error Codes (just a few examples)
+ERR_NOERROR = 0x00
+ERR_INVALID_DEVICE_ID = 0x01
+ERR_NULL_PARAMETER = 0x02
+ERR_INVALID_IOCTL_ID = 0x03
+# ... many more
+
+# Protocol IDs
+PROTOCOL_CAN = 0x05
+PROTOCOL_ISO15765 = 0x06 # UDS over CAN
+
+# Connect Flags
+CAN_250KBPS = 0x01
+CAN_500KBPS = 0x02
+
+# Message Types
+ISO15765_FRAME_PAD = 0x00000004 # Some drivers require padding for UDS messages
+
+# --- J2534 Structs (Simplified) ---
+# These mirror the C structs defined in the J2534 standard
+
+class SCONFIG(ctypes.Structure):
+   _fields_ = [
+       ("Parameter", ctypes.c_ulong),
+       ("Value", ctypes.c_ulong),
+   ]
+
+class SCONFIG_LIST(ctypes.Structure):
+   _fields_ = [
+       ("NumOfParams", ctypes.c_ulong),
+       ("ConfigPtr", ctypes.POINTER(SCONFIG)),
+   ]
+
+class PASSTHRU_MSG(ctypes.Structure):
+   _fields_ = [
+       ("ProtocolID", ctypes.c_ulong),
+       ("RxStatus", ctypes.c_ulong),
+       ("TxFlags", ctypes.c_ulong),
+       ("Timestamp", ctypes.c_ulong),
+       ("DataSize", ctypes.c_ulong),
+       ("ExtraDataIndex", ctypes.c_ulong),
+       ("Data", ctypes.c_ubyte * 4128), # Max data size for ISO15765 + extra data
+   ]
+
+# --- J2534 Function Pointers (Conceptual) ---
+# These are the functions we'll load from the J2534 DLL
+
+# Pointer types
+LP_PASSTHRU_MSG = ctypes.POINTER(PASSTHRU_MSG)
+LP_SCONFIG_LIST = ctypes.POINTER(SCONFIG_LIST)
+LP_ULONG = ctypes.POINTER(ctypes.c_ulong)
+LP_VOID = ctypes.c_void_p # Generic pointer
+
+class J2534Interface:
+   def __init__(self, j2534_dll_path=None):
+       """
+       Initializes the J2534 interface.
+       :param j2534_dll_path: Path to the J2534 PassThru DLL for your device.
+                              (e.g., 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll')
+       """
+       self.j2534_dll = None
+       self.device_id = ctypes.c_ulong(0)
+       self.channel_id = ctypes.c_ulong(0)
+       self.connected = False
+
+       if j2534_dll_path:
+           self.load_dll(j2534_dll_path)
+       else:
+           print("Warning: No J2534 DLL path provided. Cannot use J2534 features.")
+
+   def load_dll(self, dll_path):
+       """
+       Loads the J2534 DLL and maps its functions.
+       """
+       if not os.path.exists(dll_path):
+           print(f"Error: J2534 DLL not found at {dll_path}")
+           return False
+
+       try:
+           # Load the DLL
+           if platform.system() == "Windows":
+               self.j2534_dll = ctypes.WinDLL(dll_path)
+           elif platform.system() == "Linux":
+               self.j2534_dll = ctypes.CDLL(dll_path) # Assuming .so file
+           else:
+               print("Unsupported operating system for J2534 DLL loading.")
+               return False
+
+           # Map the J2534 functions.
+           # IMPORTANT: The actual argument types (argtypes) and return types (restype)
+           # MUST match the specific J2534 DLL's function signatures.
+           # These are common but may vary slightly. Consult your device's SDK.
+
+           self.j2534_dll.PassThruOpen.argtypes = [LP_VOID, LP_ULONG]
+           self.j2534_dll.PassThruOpen.restype = ctypes.c_long # Returns S_OK (0) or error
+
+           self.j2534_dll.PassThruClose.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruClose.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruConnect.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, LP_ULONG
+           ]
+           self.j2534_dll.PassThruConnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruDisconnect.argtypes = [ctypes.c_ulong]
+           self.j2534_dll.PassThruDisconnect.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruReadMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruReadMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruWriteMsgs.argtypes = [
+               ctypes.c_ulong, LP_PASSTHRU_MSG, LP_ULONG, ctypes.c_ulong
+           ]
+           self.j2534_dll.PassThruWriteMsgs.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruIoctl.argtypes = [
+               ctypes.c_ulong, ctypes.c_ulong, LP_VOID, LP_VOID
+           ]
+           self.j2534_dll.PassThruIoctl.restype = ctypes.c_long
+
+           self.j2534_dll.PassThruSetConfig.argtypes = [ctypes.c_ulong, LP_SCONFIG_LIST]
+           self.j2534_dll.PassThruSetConfig.restype = ctypes.c_long
+
+           print(f"J2534 DLL '{dll_path}' loaded successfully.")
+           return True
+       except Exception as e:
+           print(f"Error loading J2534 DLL or mapping functions: {e}")
+           self.j2534_dll = None
+           return False
+
+   def open_device(self):
+       """
+       Opens a J2534 device.
+       """
+       if not self.j2534_dll:
+           print("J2534 DLL not loaded.")
+           return False
+
+       ret = self.j2534_dll.PassThruOpen(None, ctypes.byref(self.device_id))
+       if ret == ERR_NOERROR:
+           print(f"J2534 device opened. Device ID: {self.device_id.value}")
+           return True
+       else:
+           print(f"Failed to open J2534 device. Error: {hex(ret)}")
+           return False
+
+   def close_device(self):
+       """
+       Closes the J2534 device.
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruClose(self.device_id)
+       if ret == ERR_NOERROR:
+           print("J2534 device closed.")
+           self.device_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to close J2534 device. Error: {hex(ret)}")
+
+   def connect_channel(self, protocol_id, baudrate_flag=CAN_500KBPS):
+       """
+       Connects a communication channel to the ECU.
+       :param protocol_id: Protocol ID (e.g., PROTOCOL_ISO15765 for UDS over CAN).
+       :param baudrate_flag: Baud rate flag (e.g., CAN_500KBPS).
+       """
+       if not self.j2534_dll or self.device_id.value == 0:
+           print("Device not open.")
+           return False
+
+       ret = self.j2534_dll.PassThruConnect(
+           self.device_id,
+           protocol_id,
+           0, # Flags (e.g., for normal, loopback, etc. - 0 for default)
+           baudrate_flag, # Baud rate or flag
+           ctypes.byref(self.channel_id)
+       )
+       if ret == ERR_NOERROR:
+           self.connected = True
+           print(f"Channel connected. Channel ID: {self.channel_id.value}")
+           return True
+       else:
+           print(f"Failed to connect channel. Error: {hex(ret)}")
+           return False
+
+   def disconnect_channel(self):
+       """
+       Disconnects the communication channel.
+       """
+       if not self.j2534_dll or self.channel_id.value == 0:
+           return
+
+       ret = self.j2534_dll.PassThruDisconnect(self.channel_id)
+       if ret == ERR_NOERROR:
+           print("Channel disconnected.")
+           self.channel_id.value = 0
+           self.connected = False
+       else:
+           print(f"Failed to disconnect channel. Error: {hex(ret)}")
+
+   def read_messages(self, num_msgs_to_read=1, timeout_ms=100):
+       """
+       Reads messages from the ECU.
+       :param num_msgs_to_read: Max number of messages to attempt to read.
+       :param timeout_ms: Timeout in milliseconds.
+       :return: List of received messages (as bytes) or None on error.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return None
+
+       msgs = (PASSTHRU_MSG * num_msgs_to_read)()
+       num_msgs = ctypes.c_ulong(num_msgs_to_read)
+
+       ret = self.j2534_dll.PassThruReadMsgs(
+           self.channel_id,
+           ctypes.byref(msgs[0]),
+           ctypes.byref(num_msgs),
+           timeout_ms
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value > 0:
+           received_data = []
+           for i in range(num_msgs.value):
+               msg_data = bytes(msgs[i].Data[:msgs[i].DataSize])
+               received_data.append(msg_data)
+           return received_data
+       elif ret != ERR_NOERROR:
+           print(f"Error reading messages: {hex(ret)}")
+           return None
+       return [] # No messages read
+
+   def write_message(self, protocol_id, data, tx_flags=0):
+       """
+       Writes a single message to the ECU.
+       :param protocol_id: Protocol ID of the message.
+       :param data: Bytes to send.
+       :param tx_flags: Transmit flags (e.g., ISO15765_FRAME_PAD).
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       msg = PASSTHRU_MSG()
+       msg.ProtocolID = protocol_id
+       msg.TxFlags = tx_flags
+       msg.DataSize = len(data)
+       
+       # Copy data to the ctypes array
+       for i, byte_val in enumerate(data):
+           msg.Data[i] = byte_val
+
+       num_msgs = ctypes.c_ulong(1) # Sending one message
+
+       ret = self.j2534_dll.PassThruWriteMsgs(
+           self.channel_id,
+           ctypes.byref(msg),
+           ctypes.byref(num_msgs),
+           0 # Timeout (0 means write immediately)
+       )
+
+       if ret == ERR_NOERROR and num_msgs.value == 1:
+           # print(f"Message written: {data.hex()}")
+           return True
+       else:
+           print(f"Error writing message: {hex(ret)}")
+           return False
+           
+   def set_config(self, parameter, value):
+       """
+       Sets a configuration parameter for the channel.
+       :param parameter: The configuration parameter ID (e.g., J2534_ISO15765_BS).
+       :param value: The value to set.
+       :return: True on success, False on failure.
+       """
+       if not self.connected:
+           print("Channel not connected.")
+           return False
+
+       # Create SCONFIG and SCONFIG_LIST
+       sconfig = SCONFIG(Parameter=parameter, Value=value)
+       sconfig_list = SCONFIG_LIST(NumOfParams=1, ConfigPtr=ctypes.pointer(sconfig))
+
+       ret = self.j2534_dll.PassThruSetConfig(self.channel_id, ctypes.byref(sconfig_list))
+       if ret == ERR_NOERROR:
+           print(f"Config set: Parameter {hex(parameter)}, Value {hex(value)}")
+           return True
+       else:
+           print(f"Failed to set config. Error: {hex(ret)}")
+           return False
+
+
+# --- Example Usage (Conceptual) ---
+if __name__ == "__main__":
+   # YOU NEED TO FIND THE ACTUAL PATH TO YOUR J2534 DLL!
+   # This will vary based on your J2534 PassThru device and its installed drivers.
+   # Common locations: C:\Program Files (x86)\<Device Manufacturer>\<Device Name>\J2534.dll
+   # Example for a Tactrix OpenPort 2.0 on Windows:
+   # J2534_DLL = 'C:\\Program Files (x86)\\OpenECU\\OpenPort 2.0 J2534\\OP20PT32.dll'
+   # Example for Mongoose-Pro GM:
+   J2534_DLL = 'C:\\Program Files (x86)\\Drew Technologies\\MongoosePro-GM\\J2534MongooseProGM.dll' # Placeholder!
+
+   if not os.path.exists(J2534_DLL):
+       print(f"ERROR: J2534 DLL not found at '{J2534_DLL}'. Please update J2534_DLL variable with your device's DLL path.")
+       print("You need a J2534 compatible device and its drivers installed.")
+       print("Exiting example.")
+       exit()
+
+   j2534_client = J2534Interface(J2534_DLL)
+
+   if j2534_client.open_device():
+       # Let's assume we're connecting to a modern Ford/Chevy/Dodge ECU that uses ISO15765 (UDS over CAN)
+       if j2534_client.connect_channel(PROTOCOL_ISO15765, CAN_500KBPS):
+           print("\n--- Sending a UDS Diagnostic Session Control Message (e.g., to switch to Extended Diagnostic Session) ---")
+           # UDS message format: Service ID + Sub-function ID (if applicable) + Data
+           # For DiagnosticSessionControl (0x10), switch to Extended Diagnostic Session (0x03)
+           uds_request = bytes([0x10, 0x03])
+           
+           # Note: For flashing, you'd use services like 0x34 (Request Download), 0x36 (Transfer Data), 0x37 (Request Transfer Exit), etc.
+           # This is highly ECU-specific and requires knowledge of the ECU's UDS implementation.
+
+           if j2534_client.write_message(PROTOCOL_ISO15765, uds_request, ISO15765_FRAME_PAD):
+               print("UDS Diagnostic Session Change request sent.")
+               # Give ECU time to respond
+               time.sleep(0.1)
+               
+               print("\n--- Reading Response ---")
+               responses = j2534_client.read_messages(num_msgs_to_read=5, timeout_ms=500)
+               if responses:
+                   for resp in responses:
+                       print(f"Received UDS response: {resp.hex()}")
+                       # Expected positive response for 0x10 0x03 is 0x50 0x03
+                       if resp == bytes([0x50, 0x03]):
+                           print("Successfully switched to Extended Diagnostic Session.")
+               else:
+                   print("No response received for UDS request.")
+
+           j2534_client.disconnect_channel()
+       j2534_client.close_device()
+   else:
+       print("Failed to initialize J2534 interface.")fully switched to Extended Diagnostic Session.")
+               else:
+                   print("No response received for UDS request.")
+
+           j2534_client.disconnect_channel()
+       j2534_client.close_device()
+   else:
+       print("Failed to initialize J2534 interface.")
